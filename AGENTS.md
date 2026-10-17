@@ -24,13 +24,16 @@ effects, which are not built yet. Keep changes small.
   monitor (same WSLg handling as `~/tetris`: `FLAG_WINDOW_UNDECORATED`, sized
   over the chosen monitor after `InitWindow()`, since RAIL ignores
   `SetWindowMonitor()`/`FLAG_FULLSCREEN_MODE`). Draws exactly one atlas frame
-  at 1:1 pixels in the center of the screen. Keypad `7 8 9 / 4 6 / 1 2 3` picks
-  one of the eight facings; each press alternates that facing's step pose
-  (walk row, column 0) with a standing frame (idle row), so mashing walks.
-  `0` stops into the standing row and, while standing, cycles the idle frames.
-  Arrows alias the four cardinals for keyboards without a pad. When a world
-  exists the player stays centered and the world moves around them — keep the
-  sprite drawn at screen center.
+  at 1:1 pixels in the center of the screen, inside a lazily generated maze of
+  64 px tiles (see **World** below). Keypad `7 8 9 / 4 6 / 1 2 3` steps one
+  tile per press in that facing and alternates the step pose (walk row,
+  column 0) with a standing frame (idle row); walls and closed doors block
+  movement (diagonals also need both adjacent cardinals open — no corner
+  cutting). `ENTER` opens the door being faced (it becomes a walkable stone
+  threshold). `0` stops into the standing row and cycles idle frames. Arrows
+  alias the four cardinals for keyboards without a pad. The avatar is always
+  drawn at screen center; the world scrolls beneath it one whole tile per
+  step — no sub-tile camera.
 - `Hooded_Rogue_256_Frame_Sprite_Atlas.png` — 1254x1254 RGBA, 256 frames,
   16 columns x 16 rows.
 
@@ -63,6 +66,21 @@ effects, which are not built yet. Keep changes small.
   NumLock on or off; this was verified empirically with xdotool under both
   states. Do not add numlock handling.
 
+## World (sparse maze, procedural tiles)
+
+- Model-A lattice: even-even tiles are rooms, odd-even/even-odd tiles are
+  corridor tiles (1-in-6 become closed doors at carve time), odd-odd is always
+  solid. The maze is grown lazily from a stack of pending rooms by a
+  randomized DFS biased toward the avatar (carve until every room within
+  view radius + 2 exists), so everything carved stays a connected perfect
+  maze as you explore.
+- Tiles live in an open-addressed hash map (`PackXY`/`TileGet`/`TileSet`);
+  absent = stone wall. `T_THRESHOLD` (opened door) is walkable. The stack and
+  map are the only world state — no bounds, no 2D array.
+- Tile art is generated at startup with `GenImageColor` + `ImageDraw*`:
+  light-wood floor, stone-brick wall, dark-wood door, stone threshold. No
+  asset files. (This raylib's `ImageDrawLine` takes ints, not Vector2s.)
+
 ## Conventions
 
 - If the user sends any message after a program was started, assume they exited
@@ -76,9 +94,10 @@ effects, which are not built yet. Keep changes small.
   `ATLAS_PX/16`) because "atlases are square grids". This one is not, and the
   failure is silent: rows 13-16 draw the wrong/partial sprites. Same for
   `COL_X`'s rounding.
-- **Center-only drawing.** The sprite is always drawn at screen center at
-  native resolution, one frame at a time. Don't scale it to the window, and
-  don't add camera/position state until there is a world to scroll.
+- **Center-only drawing.** The avatar is always drawn at screen center at
+  native resolution, one frame at a time; the world scrolls beneath it in
+  whole-tile steps. Don't scale the sprite to the window, and don't add a
+  sub-tile camera until there's a reason to.
 - **The direction table.** `DIR_NAME`/`KP_DIR` encode the row reading above;
   don't re-derive it from pixels or "fix" the odd clockwise order, and don't
   turn the animation rows back into a free-form 16x16 cursor.

@@ -1,10 +1,13 @@
 // "class" - a roguelike where you pick your class (by analogy to rogue).
 // Skeleton: draw one frame of the hooded-rogue atlas, centered, at native
-// resolution. The keypad walks the eight facings: each direction key
-// alternates that facing's standing frame with its step frame, 0 stops. The
-// player never moves; the world will later move around us.
+// resolution, inside a lazily generated maze. The keypad steps the eight
+// facings one tile at a time; the avatar stays in the middle and the world
+// moves around it. ENTER opens the door being faced.
 #include "raylib.h"
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define ATLAS_FILE "Hooded_Rogue_256_Frame_Sprite_Atlas.png"
 
@@ -45,6 +48,199 @@ static const char *DIR_NAME[8] = { "S", "SW", "W", "NW", "N", "NE", "E", "SE" };
 // Keypad digit -> direction index, keypad layout 7 8 9 / 4 6 / 1 2 3:
 // 8=N, 9=NE, 6=E, 3=SE, 2=S, 1=SW, 4=W, 7=NW. 0 (stop) and 5 (centre) are -1.
 static const int KP_DIR[10] = { -1, 1, 0, 7, 2, -1, 6, 3, 4, 5 };
+
+// Screen-space step vector per facing (y grows downward, so S is +y).
+static const int DIR_DX[8] = { 0,-1,-1,-1, 0, 1, 1, 1 };
+static const int DIR_DY[8] = { 1, 1, 0,-1,-1,-1, 0, 1 };
+
+// ---------------------------------------------------------------- world ----
+// Model-A maze lattice: even-even tiles are rooms, odd-even/even-odd tiles
+// are corridors (sometimes doors), odd-odd is always solid. The maze is
+// grown lazily from a stack of pending rooms, biased toward the avatar, so
+// what is carved stays a connected perfect maze as you explore.
+#define TILE     64
+#define MAZE_GROWTH_BIAS 6 // out of 10: chance a carve heads toward the avatar
+
+enum { T_FLOOR = 1, T_DOOR = 2, T_THRESHOLD = 3 };
+
+typedef struct { uint64_t key; uint8_t tile; } TileSlot;
+static TileSlot *gTiles;              // open-addressed hash; absent = wall
+static int gTilesCap, gTilesCount;
+static uint64_t *gStack;              // rooms carved but not fully expanded
+static int gStackN, gStackCap;
+
+static uint64_t PackXY(int x, int y) {
+    return ((uint64_t)(uint32_t)x << 32) | (uint32_t)y;
+}
+static int UnpackX(uint64_t k) { return (int)(int32_t)(k >> 32); }
+static int UnpackY(uint64_t k) { return (int)(int32_t)k; }
+
+static uint64_t Mix64(uint64_t z) { // splitmix64 finalizer
+    z += 0x9e3779b97f4a7c15ULL;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+static uint8_t TileGet(int x, int y) {
+    if (!gTilesCap) return 0;
+    uint64_t k = PackXY(x, y);
+    size_t i = (size_t)Mix64(k) & (size_t)(gTilesCap - 1);
+    while (gTiles[i].tile) { // tile 0 marks an empty slot; (0,0) is a floor
+        if (gTiles[i].key == k) return gTiles[i].tile;
+        i = (i + 1) & (size_t)(gTilesCap - 1);
+    }
+    return 0;
+}
+
+static void TileSetRaw(uint64_t k, uint8_t t) {
+    if (!gTilesCap) { // first carve: open-addressed table needs a power of two
+        gTilesCap = 256;
+        gTiles = calloc((size_t)gTilesCap, sizeof *gTiles);
+    }
+    size_t i = (size_t)Mix64(k) & (size_t)(gTilesCap - 1);
+    while (gTiles[i].tile) {
+        if (gTiles[i].key == k) { gTiles[i].tile = t; return; }
+        i = (i + 1) & (size_t)(gTilesCap - 1);
+    }
+    gTiles[i].key = k;
+    gTiles[i].tile = t;
+    gTilesCount++;
+    if (gTilesCount * 10 >= gTilesCap * 7) { // grow: rehash everything
+        int newCap = gTilesCap * 2;
+        TileSlot *ns = calloc((size_t)newCap, sizeof *ns);
+        for (int j = 0; j < gTilesCap; j++) if (gTiles[j].tile) {
+            size_t n = (size_t)Mix64(gTiles[j].key) & (size_t)(newCap - 1);
+            while (ns[n].tile) n = (n + 1) & (size_t)(newCap - 1);
+            ns[n] = gTiles[j];
+        }
+        free(gTiles);
+        gTiles = ns;
+        gTilesCap = newCap;
+    }
+}
+static void TileSet(int x, int y, uint8_t t) { TileSetRaw(PackXY(x, y), t); }
+
+static void StackPush(uint64_t k) {
+    if (gStackN == gStackCap) {
+        gStackCap = gStackCap ? gStackCap * 2 : 256;
+        gStack = realloc(gStack, (size_t)gStackCap * sizeof *gStack);
+    }
+    gStack[gStackN++] = k;
+}
+
+static const int MDX[4] = { 0, 1, 0,-1 }; // maze growth: N E S W
+static const int MDY[4] = {-1, 0, 1, 0 };
+
+// Carve one room's worth of maze (one passage to a random unvisited
+// neighbour, biased toward the avatar), or backtrack if none remain.
+static void GrowMaze(int px, int py) {
+    if (gStackN == 0) { TileSet(0, 0, T_FLOOR); StackPush(PackXY(0, 0)); }
+
+    int best = 0, bd = 1 << 30; // expand the pending room nearest the avatar
+    for (int i = 0; i < gStackN; i++) {
+        int dx = UnpackX(gStack[i]) - px, dy = UnpackY(gStack[i]) - py;
+        int d = dx * dx + dy * dy;
+        if (d < bd) { bd = d; best = i; }
+    }
+    int cx = UnpackX(gStack[best]), cy = UnpackY(gStack[best]);
+
+    int order[4] = { 0, 1, 2, 3 };
+    for (int i = 3; i > 0; i--) {
+        int j = rand() % (i + 1), t = order[i];
+        order[i] = order[j];
+        order[j] = t;
+    }
+    int unv[4], nu = 0;
+    for (int i = 0; i < 4; i++)
+        if (!TileGet(cx + 2 * MDX[order[i]], cy + 2 * MDY[order[i]]))
+            unv[nu++] = order[i];
+    if (nu == 0) { gStack[best] = gStack[--gStackN]; return; } // backtrack
+
+    int pick = unv[rand() % nu];
+    if (nu > 1 && rand() % 10 < MAZE_GROWTH_BIAS) {
+        int td = 1 << 30;
+        for (int i = 0; i < nu; i++) {
+            int dx = cx + 2 * MDX[unv[i]] - px, dy = cy + 2 * MDY[unv[i]] - py;
+            int d = dx * dx + dy * dy;
+            if (d < td) { td = d; pick = unv[i]; }
+        }
+    }
+    int mid = rand() % 6 == 0 ? T_DOOR : T_FLOOR; // corridor between rooms
+    TileSet(cx + MDX[pick], cy + MDY[pick], (uint8_t)mid);
+    TileSet(cx + 2 * MDX[pick], cy + 2 * MDY[pick], T_FLOOR);
+    StackPush(PackXY(cx + 2 * MDX[pick], cy + 2 * MDY[pick]));
+}
+
+// Carve until every room within Chebyshev distance R of the avatar exists.
+static void EnsureWorld(int px, int py, int R) {
+    for (int n = 0; n < 3000; n++) {
+        int ready = 1;
+        for (int y = py - R; y <= py + R && ready; y++)
+            for (int x = px - R; x <= px + R; x++)
+                if (((x | y) & 1) == 0 && !TileGet(x, y)) { ready = 0; break; }
+        if (ready) return;
+        GrowMaze(px, py);
+    }
+}
+
+static int Walkable(int x, int y) {
+    uint8_t t = TileGet(x, y);
+    return t == T_FLOOR || t == T_THRESHOLD; // closed doors block
+}
+
+// Procedural tile art: no asset files, just a little pixel scribbling.
+static Texture2D FinishTile(Image *im) {
+    Texture2D t = LoadTextureFromImage(*im);
+    UnloadImage(*im);
+    return t;
+}
+static Texture2D MakeFloorTex(void) { // light wood planks
+    Image im = GenImageColor(TILE, TILE, (Color){205,170,120,255});
+    Color seam = (Color){162,126,80,255};
+    for (int y = 0; y < TILE; y += 16)
+        ImageDrawLine(&im, 0, y, TILE - 1, y, seam);
+    for (int y = 0, row = 0; y < TILE; y += 16, row++) {
+        int jx = (row & 1) ? 22 : 48; // staggered plank ends
+        ImageDrawLine(&im, jx, y, jx, y + 15, seam);
+    }
+    for (int i = 0; i < TILE * 3; i++)
+        ImageDrawPixel(&im, rand() % TILE, rand() % TILE,
+                       (Color){188,153,104,255}); // grain speckle
+    return FinishTile(&im);
+}
+static Texture2D MakeWallTex(void) { // rough stone bricks
+    Image im = GenImageColor(TILE, TILE, (Color){112,112,120,255});
+    Color mortar = (Color){74,74,80,255};
+    for (int y = 0; y < TILE; y += 16) {
+        ImageDrawLine(&im, 0, y, TILE - 1, y, mortar);
+        for (int x = ((y / 16) & 1) ? 0 : 16; x < TILE; x += 32)
+            ImageDrawLine(&im, x, y, x, y + 15, mortar);
+    }
+    for (int i = 0; i < TILE * 4; i++) {
+        int v = rand() % 36 - 18;
+        ImageDrawPixel(&im, rand() % TILE, rand() % TILE,
+                       (Color){112 + v, 112 + v, 120 + v, 255});
+    }
+    return FinishTile(&im);
+}
+static Texture2D MakeDoorTex(void) { // dark wood, planked, with a knob
+    Image im = GenImageColor(TILE, TILE, (Color){86,52,30,255});
+    Color plank = (Color){58,34,18,255};
+    for (int x = 0; x < TILE; x += 12)
+        ImageDrawLine(&im, x, 0, x, TILE - 1, plank);
+    ImageDrawRectangleLines(&im, 1, 1, TILE - 2, TILE - 2, plank);
+    ImageDrawRectangleLines(&im, 2, 2, TILE - 4, TILE - 4, plank);
+    ImageDrawCircle(&im, TILE - 14, TILE / 2, 2, (Color){186,164,96,255});
+    return FinishTile(&im);
+}
+static Texture2D MakeThreshTex(void) { // stone threshold for open doors
+    Image im = GenImageColor(TILE, TILE, (Color){130,128,134,255});
+    ImageDrawRectangleLines(&im, 2, 2, TILE - 4, TILE - 4, (Color){92,90,96,255});
+    ImageDrawRectangleLines(&im, 3, 3, TILE - 6, TILE - 6, (Color){92,90,96,255});
+    ImageDrawLine(&im, 3, TILE / 2, TILE - 4, TILE / 2, (Color){104,102,108,255});
+    return FinishTile(&im);
+}
 
 // Pick the external monitor. On WSLg the built-in laptop panel and the
 // external monitor are both named "rdp-N", so names alone can't tell them
@@ -99,13 +295,18 @@ int main(void) {
                  atlas.width, atlas.height, ATLAS_PX, ATLAS_PX);
 
     // dir = facing 0..7 (DIR_NAME, atlas row dir when standing, dir+8 when
-    // stepping); idleCol is the standing cycle.
+    // stepping); idleCol is the standing cycle; (px,py) is the avatar's world
+    // tile - the avatar never moves on screen, the world scrolls beneath it.
     int dir = 0, stepping = 0, col = 0, idleCol = 0;
+    int px = 0, py = 0;
+    srand((unsigned)time(NULL));
+    Texture2D texFloor = MakeFloorTex(), texWall = MakeWallTex();
+    Texture2D texDoor = MakeDoorTex(), texThresh = MakeThreshTex();
 
     while (!WindowShouldClose()) {
-        // Walking is an alternation: a direction press shows that facing's
-        // step pose (walk row, column 0), the next press of the same key
-        // shows a standing frame (idle row), then step again. 0 stops into
+        // A direction press steps one tile (blocked by walls and closed
+        // doors) and shows that facing's step pose; the next press of the
+        // same key shows a standing frame, then step again. 0 stops into
         // the standing row and, while standing, cycles its frames.
         // GLFW resolves keypad keys by physical scancode, so KEY_KP_*
         // fires with NumLock on or off alike - no numlock handling needed.
@@ -122,6 +323,12 @@ int main(void) {
             if (stepping) { stepping = 0; col = idleCol; }
             else { idleCol = (idleCol + 1) % NC; col = idleCol; }
         } else if (d >= 0) {
+            int tx = px + DIR_DX[d], ty = py + DIR_DY[d];
+            int open = Walkable(tx, ty) &&
+                       (DIR_DX[d] == 0 || DIR_DY[d] == 0 || // no corner cutting
+                        (Walkable(px + DIR_DX[d], py) &&
+                         Walkable(px, py + DIR_DY[d])));
+            if (open) { px = tx; py = ty; }
             if (d == dir && stepping) { // already stepping: take a stand break
                 stepping = 0;
                 col = idleCol;
@@ -132,13 +339,36 @@ int main(void) {
                 col = 0;                // the step pose sits in column 0
             }
         }
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+            int fx = px + DIR_DX[dir], fy = py + DIR_DY[dir];
+            if (TileGet(fx, fy) == T_DOOR) TileSet(fx, fy, T_THRESHOLD);
+        }
 
         int row = stepping ? dir + 8 : dir;
+
+        // Grow the maze around the avatar to comfortably past the view.
+        int rw = GetRenderWidth() / TILE / 2 + 2;
+        int rh = GetRenderHeight() / TILE / 2 + 2;
+        EnsureWorld(px, py, rw > rh ? rw : rh);
 
         BeginDrawing();
             ClearBackground((Color){18,18,24,255});
 
             int sw = GetRenderWidth(), sh = GetRenderHeight();
+            int cx0 = sw / 2 - TILE / 2, cy0 = sh / 2 - TILE / 2;
+            int cols = sw / TILE / 2 + 2, rows = sh / TILE / 2 + 2;
+            for (int wy = py - rows; wy <= py + rows; wy++) {
+                for (int wx = px - cols; wx <= px + cols; wx++) {
+                    const Texture2D *tex = &texWall;
+                    uint8_t t = TileGet(wx, wy);
+                    if (t == T_FLOOR) tex = &texFloor;
+                    else if (t == T_DOOR) tex = &texDoor;
+                    else if (t == T_THRESHOLD) tex = &texThresh;
+                    DrawTexture(*tex, cx0 + (wx - px) * TILE,
+                                cy0 + (wy - py) * TILE, WHITE);
+                }
+            }
+
             Rectangle src = {
                 COL_X[col], ROW_Y[row],
                 COL_X[col + 1] - COL_X[col],
@@ -156,12 +386,16 @@ int main(void) {
                                 row * ATLAS_COLS + col + 1, DIR_NAME[dir],
                                 stepping ? "STEP" : "IDLE", col + 1, NC),
                      16, 16, fs, (Color){180,180,200,255});
-            DrawText("KEYPAD 7-9/4 6/1-3 step/stand   0 stop + cycle idle   ARROWS cardinals   ESC quits",
+            DrawText("KEYPAD move   ENTER open door   0 stop + cycle idle   ARROWS cardinals   ESC quits",
                      16, 16 + fs * 2, fs, (Color){120,120,145,255});
         EndDrawing();
     }
 
+    UnloadTexture(texFloor); UnloadTexture(texWall);
+    UnloadTexture(texDoor);  UnloadTexture(texThresh);
     UnloadTexture(atlas);
+    free(gTiles);
+    free(gStack);
     CloseWindow();
     return 0;
 }
