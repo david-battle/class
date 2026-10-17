@@ -75,7 +75,11 @@ effects, which are not built yet. Keep changes small.
   game loads the file at startup and errors if it is missing.
 - Tiles still live in the open-addressed hash map (`PackXY`/`TileGet`/
   `TileSet`); absent = solid ship wall. Outside `[0,W)x[0,H)` renders as
-  ocean (unwalkable). `T_THRESHOLD` (opened door/bars) is walkable.
+  ocean (unwalkable), as does in-bounds `T_WATER`. `T_THRESHOLD` (opened
+  door/bars) is walkable. Hull walls are 2 tiles thick; the bow (west end)
+  tapers to a point over x=0..3 (explicit `T_WATER` corners, since map
+  bounds are rectangular — outside them is always ocean) and the deck
+  corridor pokes forward to x=2.
 - Level 1 is a prison ship: start in a cell with `T_BARS` (left unlocked —
   locking it is a planned revision), cross mess/cargo/galley/crew, reach the
   `T_WHEEL` on the stern deck to finish (movement freezes, HUD banner).

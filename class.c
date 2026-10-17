@@ -63,7 +63,8 @@ static const int DIR_DY[8] = { 1, 1, 0,-1,-1,-1, 0, 1 };
 #define TILE       64
 #define LEVEL_FILE "level1.map"
 
-enum { T_FLOOR = 1, T_DOOR = 2, T_THRESHOLD = 3, T_BARS = 4, T_WHEEL = 5 };
+enum { T_FLOOR = 1, T_DOOR = 2, T_THRESHOLD = 3, T_BARS = 4, T_WHEEL = 5,
+       T_WATER = 6 }; // open sea inside the hull outline (bow taper)
 
 typedef struct { uint64_t key; uint8_t tile; } TileSlot;
 static TileSlot *gTiles;              // open-addressed hash; absent = wall
@@ -153,34 +154,48 @@ static int LoadLevel(const char *path, int *sx, int *sy) {
 // Level 1: a prison ship at sea. Start locked in a cell (bars left
 // unlocked for now), cross the mess/cargo/galley/crew areas, reach the
 // ship's wheel on the stern deck. Fully hand-placed - no randomness, so
-// regenerating the file is deterministic.
+// regenerating the file is deterministic. Hull walls are 2 tiles thick
+// (the prow end tapers to a point over x=0..3; its corners are explicit
+// T_WATER tiles since the map bounds are rectangular).
 static void GenLevel1(const char *path) {
     gMapW = 48;
     gMapH = 28;
-    for (int x = 4; x <= 34; x++) { // main corridor, west-east
+    for (int x = 4; x <= 34; x++) { // main corridor, west-east (into the bow)
         TileSet(x, 13, T_FLOOR);
         TileSet(x, 14, T_FLOOR);
     }
-    for (int y = 5; y <= 11; y++)   // prison cell, barred door south
+    for (int y = 2; y <= 11; y++)   // prison cell, barred door south
         for (int x = 4; x <= 8; x++) TileSet(x, y, T_FLOOR);
     TileSet(6, 12, T_BARS);
-    for (int y = 5; y <= 11; y++) { // mess hall and cargo hold, north
-        for (int x = 13; x <= 21; x++) TileSet(x, y, T_FLOOR);
-        for (int x = 25; x <= 33; x++) TileSet(x, y, T_FLOOR);
+    for (int y = 2; y <= 11; y++) { // mess hall and cargo hold, north
+        for (int x = 11; x <= 21; x++) TileSet(x, y, T_FLOOR);
+        for (int x = 24; x <= 33; x++) TileSet(x, y, T_FLOOR);
     }
     TileSet(17, 12, T_DOOR);
     TileSet(29, 12, T_DOOR);
-    for (int y = 16; y <= 22; y++) { // galley and crew quarters, south
+    for (int y = 16; y <= 25; y++) { // galley and crew quarters, south
         for (int x = 8; x <= 16; x++) TileSet(x, y, T_FLOOR);
-        for (int x = 20; x <= 28; x++) TileSet(x, y, T_FLOOR);
+        for (int x = 19; x <= 28; x++) TileSet(x, y, T_FLOOR);
     }
     TileSet(12, 15, T_DOOR);
     TileSet(24, 15, T_DOOR);
-    for (int y = 5; y <= 22; y++)    // stern deck, double doors off corridor
+    for (int y = 2; y <= 25; y++)    // stern deck, double doors off corridor
         for (int x = 36; x <= 45; x++) TileSet(x, y, T_FLOOR);
     TileSet(35, 13, T_DOOR);
     TileSet(35, 14, T_DOOR);
     TileSet(42, 12, T_WHEEL);
+    // Bow: taper the west end to a point at corridor height - wood only
+    // inside a symmetric wedge, open water elsewhere in those columns,
+    // with the deck poking forward to x=2.
+    for (int x = 0; x <= 3; x++) {
+        int top = 1 + (3 - x) * 3, bot = 26 - (3 - x) * 3;
+        for (int y = 0; y < gMapH; y++)
+            if (y < top || y > bot) TileSet(x, y, T_WATER);
+    }
+    for (int x = 2; x <= 3; x++) {
+        TileSet(x, 13, T_FLOOR);
+        TileSet(x, 14, T_FLOOR);
+    }
 
     FILE *f = fopen(path, "w");
     if (!f) { TraceLog(LOG_ERROR, "cannot write %s", path); return; }
@@ -413,6 +428,7 @@ int main(int argc, char **argv) {
                         else if (t == T_THRESHOLD) tex = &texThresh;
                         else if (t == T_BARS) tex = &texBars;
                         else if (t == T_WHEEL) tex = &texWheel;
+                        else if (t == T_WATER) tex = &texOcean;
                     }
                     DrawTexture(*tex, cx0 + (wx - px) * TILE,
                                 cy0 + (wy - py) * TILE, WHITE);
