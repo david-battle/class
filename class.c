@@ -1,13 +1,16 @@
 // "class" - a roguelike where you pick your class (by analogy to rogue).
 // Skeleton: draw one frame of the hooded-rogue atlas, centered, at native
-// resolution, inside a lazily generated maze. The keypad steps the eight
-// facings one tile at a time; the avatar stays in the middle and the world
-// moves around it. ENTER opens the door being faced.
+// resolution, inside a pre-generated level (level1.map: a prison ship -
+// escape the cell, cross the ship, reach the wheel). The keypad steps the
+// eight facings one tile at a time; the avatar stays in the middle and the
+// world moves around it. ENTER opens the door or bars being faced.
+// `./class gen` (re)writes the level file.
 #include "raylib.h"
+#include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define ATLAS_FILE "Hooded_Rogue_256_Frame_Sprite_Atlas.png"
 
@@ -54,20 +57,18 @@ static const int DIR_DX[8] = { 0,-1,-1,-1, 0, 1, 1, 1 };
 static const int DIR_DY[8] = { 1, 1, 0,-1,-1,-1, 0, 1 };
 
 // ---------------------------------------------------------------- world ----
-// Model-A maze lattice: even-even tiles are rooms, odd-even/even-odd tiles
-// are corridors (sometimes doors), odd-odd is always solid. The maze is
-// grown lazily from a stack of pending rooms, biased toward the avatar, so
-// what is carved stays a connected perfect maze as you explore.
-#define TILE     64
-#define MAZE_GROWTH_BIAS 6 // out of 10: chance a carve heads toward the avatar
+// Tiles live in a sparse open-addressed hash map; absent = solid ship wall
+// (wood, not stone - this is a ship). Levels are pre-generated text files
+// (see GenLevel1/LoadLevel); `./class gen` writes the default one.
+#define TILE       64
+#define LEVEL_FILE "level1.map"
 
-enum { T_FLOOR = 1, T_DOOR = 2, T_THRESHOLD = 3 };
+enum { T_FLOOR = 1, T_DOOR = 2, T_THRESHOLD = 3, T_BARS = 4, T_WHEEL = 5 };
 
 typedef struct { uint64_t key; uint8_t tile; } TileSlot;
 static TileSlot *gTiles;              // open-addressed hash; absent = wall
 static int gTilesCap, gTilesCount;
-static uint64_t *gStack;              // rooms carved but not fully expanded
-static int gStackN, gStackCap;
+static int gMapW, gMapH;              // level bounds; outside = open ocean
 
 static uint64_t PackXY(int x, int y) {
     return ((uint64_t)(uint32_t)x << 32) | (uint32_t)y;
@@ -121,72 +122,74 @@ static void TileSetRaw(uint64_t k, uint8_t t) {
 }
 static void TileSet(int x, int y, uint8_t t) { TileSetRaw(PackXY(x, y), t); }
 
-static void StackPush(uint64_t k) {
-    if (gStackN == gStackCap) {
-        gStackCap = gStackCap ? gStackCap * 2 : 256;
-        gStack = realloc(gStack, (size_t)gStackCap * sizeof *gStack);
-    }
-    gStack[gStackN++] = k;
-}
-
-static const int MDX[4] = { 0, 1, 0,-1 }; // maze growth: N E S W
-static const int MDY[4] = {-1, 0, 1, 0 };
-
-// Carve one room's worth of maze (one passage to a random unvisited
-// neighbour, biased toward the avatar), or backtrack if none remain.
-static void GrowMaze(int px, int py) {
-    if (gStackN == 0) { TileSet(0, 0, T_FLOOR); StackPush(PackXY(0, 0)); }
-
-    int best = 0, bd = 1 << 30; // expand the pending room nearest the avatar
-    for (int i = 0; i < gStackN; i++) {
-        int dx = UnpackX(gStack[i]) - px, dy = UnpackY(gStack[i]) - py;
-        int d = dx * dx + dy * dy;
-        if (d < bd) { bd = d; best = i; }
-    }
-    int cx = UnpackX(gStack[best]), cy = UnpackY(gStack[best]);
-
-    int order[4] = { 0, 1, 2, 3 };
-    for (int i = 3; i > 0; i--) {
-        int j = rand() % (i + 1), t = order[i];
-        order[i] = order[j];
-        order[j] = t;
-    }
-    int unv[4], nu = 0;
-    for (int i = 0; i < 4; i++)
-        if (!TileGet(cx + 2 * MDX[order[i]], cy + 2 * MDY[order[i]]))
-            unv[nu++] = order[i];
-    if (nu == 0) { gStack[best] = gStack[--gStackN]; return; } // backtrack
-
-    int pick = unv[rand() % nu];
-    if (nu > 1 && rand() % 10 < MAZE_GROWTH_BIAS) {
-        int td = 1 << 30;
-        for (int i = 0; i < nu; i++) {
-            int dx = cx + 2 * MDX[unv[i]] - px, dy = cy + 2 * MDY[unv[i]] - py;
-            int d = dx * dx + dy * dy;
-            if (d < td) { td = d; pick = unv[i]; }
-        }
-    }
-    int mid = rand() % 6 == 0 ? T_DOOR : T_FLOOR; // corridor between rooms
-    TileSet(cx + MDX[pick], cy + MDY[pick], (uint8_t)mid);
-    TileSet(cx + 2 * MDX[pick], cy + 2 * MDY[pick], T_FLOOR);
-    StackPush(PackXY(cx + 2 * MDX[pick], cy + 2 * MDY[pick]));
-}
-
-// Carve until every room within Chebyshev distance R of the avatar exists.
-static void EnsureWorld(int px, int py, int R) {
-    for (int n = 0; n < 3000; n++) {
-        int ready = 1;
-        for (int y = py - R; y <= py + R && ready; y++)
-            for (int x = px - R; x <= px + R; x++)
-                if (((x | y) & 1) == 0 && !TileGet(x, y)) { ready = 0; break; }
-        if (ready) return;
-        GrowMaze(px, py);
-    }
-}
-
 static int Walkable(int x, int y) {
     uint8_t t = TileGet(x, y);
-    return t == T_FLOOR || t == T_THRESHOLD; // closed doors block
+    return t == T_FLOOR || t == T_THRESHOLD || t == T_WHEEL; // doors/bars block
+}
+
+// Level files are plain text: "format 1", "size W H", "start X Y", and one
+// "tile X Y T" line per non-wall tile (absent tiles are ship wall).
+static int LoadLevel(const char *path, int *sx, int *sy) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char tag[16];
+    int a, b, c;
+    while (fscanf(f, "%15s", tag) == 1) {
+        if (!strcmp(tag, "format")) { if (fscanf(f, "%d", &a) != 1) break; }
+        else if (!strcmp(tag, "size")) {
+            if (fscanf(f, "%d %d", &gMapW, &gMapH) != 2) break;
+        } else if (!strcmp(tag, "start")) {
+            if (fscanf(f, "%d %d", sx, sy) != 2) break;
+        } else if (!strcmp(tag, "tile")) {
+            if (fscanf(f, "%d %d %d", &a, &b, &c) == 3) TileSet(a, b, (uint8_t)c);
+            else break;
+        } else { TraceLog(LOG_WARNING, "bad token '%s' in %s", tag, path); break; }
+    }
+    fclose(f);
+    TraceLog(LOG_INFO, "level %s: %dx%d, %d tiles", path, gMapW, gMapH, gTilesCount);
+    return 1;
+}
+
+// Level 1: a prison ship at sea. Start locked in a cell (bars left
+// unlocked for now), cross the mess/cargo/galley/crew areas, reach the
+// ship's wheel on the stern deck. Fully hand-placed - no randomness, so
+// regenerating the file is deterministic.
+static void GenLevel1(const char *path) {
+    gMapW = 48;
+    gMapH = 28;
+    for (int x = 4; x <= 34; x++) { // main corridor, west-east
+        TileSet(x, 13, T_FLOOR);
+        TileSet(x, 14, T_FLOOR);
+    }
+    for (int y = 5; y <= 11; y++)   // prison cell, barred door south
+        for (int x = 4; x <= 8; x++) TileSet(x, y, T_FLOOR);
+    TileSet(6, 12, T_BARS);
+    for (int y = 5; y <= 11; y++) { // mess hall and cargo hold, north
+        for (int x = 13; x <= 21; x++) TileSet(x, y, T_FLOOR);
+        for (int x = 25; x <= 33; x++) TileSet(x, y, T_FLOOR);
+    }
+    TileSet(17, 12, T_DOOR);
+    TileSet(29, 12, T_DOOR);
+    for (int y = 16; y <= 22; y++) { // galley and crew quarters, south
+        for (int x = 8; x <= 16; x++) TileSet(x, y, T_FLOOR);
+        for (int x = 20; x <= 28; x++) TileSet(x, y, T_FLOOR);
+    }
+    TileSet(12, 15, T_DOOR);
+    TileSet(24, 15, T_DOOR);
+    for (int y = 5; y <= 22; y++)    // stern deck, double doors off corridor
+        for (int x = 36; x <= 45; x++) TileSet(x, y, T_FLOOR);
+    TileSet(35, 13, T_DOOR);
+    TileSet(35, 14, T_DOOR);
+    TileSet(42, 12, T_WHEEL);
+
+    FILE *f = fopen(path, "w");
+    if (!f) { TraceLog(LOG_ERROR, "cannot write %s", path); return; }
+    fprintf(f, "format 1\nsize %d %d\nstart 6 8\n", gMapW, gMapH);
+    for (int i = 0; i < gTilesCap; i++) if (gTiles[i].tile)
+        fprintf(f, "tile %d %d %d\n", UnpackX(gTiles[i].key),
+                UnpackY(gTiles[i].key), gTiles[i].tile);
+    fclose(f);
+    TraceLog(LOG_INFO, "wrote %s (%d tiles)", path, gTilesCount);
 }
 
 // Procedural tile art: no asset files, just a little pixel scribbling.
@@ -209,19 +212,13 @@ static Texture2D MakeFloorTex(void) { // light wood planks
                        (Color){188,153,104,255}); // grain speckle
     return FinishTile(&im);
 }
-static Texture2D MakeWallTex(void) { // rough stone bricks
-    Image im = GenImageColor(TILE, TILE, (Color){112,112,120,255});
-    Color mortar = (Color){74,74,80,255};
-    for (int y = 0; y < TILE; y += 16) {
-        ImageDrawLine(&im, 0, y, TILE - 1, y, mortar);
-        for (int x = ((y / 16) & 1) ? 0 : 16; x < TILE; x += 32)
-            ImageDrawLine(&im, x, y, x, y + 15, mortar);
-    }
-    for (int i = 0; i < TILE * 4; i++) {
-        int v = rand() % 36 - 18;
-        ImageDrawPixel(&im, rand() % TILE, rand() % TILE,
-                       (Color){112 + v, 112 + v, 120 + v, 255});
-    }
+static Texture2D MakeWallTex(void) { // dark wood ship planking (was stone)
+    Image im = GenImageColor(TILE, TILE, (Color){86,52,30,255});
+    Color seam = (Color){58,34,18,255};
+    for (int x = 0; x < TILE; x += 12)
+        ImageDrawLine(&im, x, 0, x, TILE - 1, seam);
+    ImageDrawLine(&im, 0, 16, TILE - 1, 16, seam); // beams set wall off door
+    ImageDrawLine(&im, 0, 48, TILE - 1, 48, seam);
     return FinishTile(&im);
 }
 static Texture2D MakeDoorTex(void) { // dark wood, planked, with a knob
@@ -239,6 +236,41 @@ static Texture2D MakeThreshTex(void) { // stone threshold for open doors
     ImageDrawRectangleLines(&im, 2, 2, TILE - 4, TILE - 4, (Color){92,90,96,255});
     ImageDrawRectangleLines(&im, 3, 3, TILE - 6, TILE - 6, (Color){92,90,96,255});
     ImageDrawLine(&im, 3, TILE / 2, TILE - 4, TILE / 2, (Color){104,102,108,255});
+    return FinishTile(&im);
+}
+static Texture2D MakeBarsTex(void) { // cell bars: dark gap, iron uprights
+    Image im = GenImageColor(TILE, TILE, (Color){26,20,16,255});
+    Color iron = (Color){118,118,128,255}, hi = (Color){158,158,168,255};
+    for (int x = 5; x < TILE - 3; x += 10) {
+        ImageDrawRectangle(&im, x, 0, 3, TILE, iron);
+        ImageDrawLine(&im, x, 0, x, TILE - 1, hi);
+    }
+    ImageDrawRectangle(&im, 0, 20, TILE, 3, iron); // crossbars
+    ImageDrawRectangle(&im, 0, 44, TILE, 3, iron);
+    return FinishTile(&im);
+}
+static Texture2D MakeOceanTex(void) { // open water beyond the hull
+    Image im = GenImageColor(TILE, TILE, (Color){38,78,132,255});
+    Color wave = (Color){58,106,162,255};
+    for (int y = 6, r = 0; y < TILE; y += 12, r++)
+        for (int x = (r % 2) * 10; x < TILE - 8; x += 20)
+            ImageDrawLine(&im, x, y, x + 7, y, wave);
+    return FinishTile(&im);
+}
+static Texture2D MakeWheelTex(void) { // the ship's wheel, level exit
+    Image im = GenImageColor(TILE, TILE, (Color){205,170,120,255}); // deck
+    Color seam = (Color){162,126,80,255};
+    for (int y = 0; y < TILE; y += 16) ImageDrawLine(&im, 0, y, TILE - 1, y, seam);
+    Color wood = (Color){92,56,28,255};
+    ImageDrawCircleLines(&im, TILE / 2, TILE / 2, 24, wood);
+    ImageDrawCircleLines(&im, TILE / 2, TILE / 2, 23, wood);
+    for (int i = 0; i < 8; i++) { // spokes with handles past the rim
+        double a = i * 3.14159265 / 4.0;
+        ImageDrawLine(&im, TILE / 2, TILE / 2,
+                      TILE / 2 + (int)(28 * cos(a)),
+                      TILE / 2 + (int)(28 * sin(a)), wood);
+    }
+    ImageDrawCircle(&im, TILE / 2, TILE / 2, 5, (Color){60,36,16,255});
     return FinishTile(&im);
 }
 
@@ -268,7 +300,17 @@ static int SelectExternalMonitor(void) {
     return (best < 0) ? 0 : best;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "gen")) { // ./class gen [file]
+        GenLevel1(argc > 2 ? argv[2] : LEVEL_FILE);
+        return 0;
+    }
+    int px = 0, py = 0; // avatar's world tile, start filled in by the level
+    if (!LoadLevel(LEVEL_FILE, &px, &py)) {
+        TraceLog(LOG_ERROR, "failed to load %s (run ./class gen)", LEVEL_FILE);
+        return 1;
+    }
+
     // WSLg's RAIL shell ignores SetWindowMonitor()/FLAG_FULLSCREEN_MODE and
     // pins fullscreen X11 windows to the main screen, so cover the chosen
     // monitor with an undecorated window (borderless-windowed fullscreen)
@@ -298,10 +340,11 @@ int main(void) {
     // stepping); idleCol is the standing cycle; (px,py) is the avatar's world
     // tile - the avatar never moves on screen, the world scrolls beneath it.
     int dir = 0, stepping = 0, col = 0, idleCol = 0;
-    int px = 0, py = 0;
-    srand((unsigned)time(NULL));
+    int finished = 0; // reached the ship's wheel
     Texture2D texFloor = MakeFloorTex(), texWall = MakeWallTex();
     Texture2D texDoor = MakeDoorTex(), texThresh = MakeThreshTex();
+    Texture2D texBars = MakeBarsTex(), texOcean = MakeOceanTex();
+    Texture2D texWheel = MakeWheelTex();
 
     while (!WindowShouldClose()) {
         // A direction press steps one tile (blocked by walls and closed
@@ -322,13 +365,19 @@ int main(void) {
         if (IsKeyPressed(KEY_KP_0)) { // stop, or cycle the idle row while stopped
             if (stepping) { stepping = 0; col = idleCol; }
             else { idleCol = (idleCol + 1) % NC; col = idleCol; }
-        } else if (d >= 0) {
+        } else if (d >= 0 && !finished) {
             int tx = px + DIR_DX[d], ty = py + DIR_DY[d];
             int open = Walkable(tx, ty) &&
                        (DIR_DX[d] == 0 || DIR_DY[d] == 0 || // no corner cutting
                         (Walkable(px + DIR_DX[d], py) &&
                          Walkable(px, py + DIR_DY[d])));
-            if (open) { px = tx; py = ty; }
+            if (open) {
+                px = tx; py = ty;
+                if (TileGet(px, py) == T_WHEEL) {
+                    finished = 1;
+                    TraceLog(LOG_INFO, "level complete: reached the wheel");
+                }
+            }
             if (d == dir && stepping) { // already stepping: take a stand break
                 stepping = 0;
                 col = idleCol;
@@ -341,15 +390,11 @@ int main(void) {
         }
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
             int fx = px + DIR_DX[dir], fy = py + DIR_DY[dir];
-            if (TileGet(fx, fy) == T_DOOR) TileSet(fx, fy, T_THRESHOLD);
+            uint8_t t = TileGet(fx, fy);
+            if (t == T_DOOR || t == T_BARS) TileSet(fx, fy, T_THRESHOLD);
         }
 
         int row = stepping ? dir + 8 : dir;
-
-        // Grow the maze around the avatar to comfortably past the view.
-        int rw = GetRenderWidth() / TILE / 2 + 2;
-        int rh = GetRenderHeight() / TILE / 2 + 2;
-        EnsureWorld(px, py, rw > rh ? rw : rh);
 
         BeginDrawing();
             ClearBackground((Color){18,18,24,255});
@@ -359,11 +404,16 @@ int main(void) {
             int cols = sw / TILE / 2 + 2, rows = sh / TILE / 2 + 2;
             for (int wy = py - rows; wy <= py + rows; wy++) {
                 for (int wx = px - cols; wx <= px + cols; wx++) {
-                    const Texture2D *tex = &texWall;
-                    uint8_t t = TileGet(wx, wy);
-                    if (t == T_FLOOR) tex = &texFloor;
-                    else if (t == T_DOOR) tex = &texDoor;
-                    else if (t == T_THRESHOLD) tex = &texThresh;
+                    const Texture2D *tex = &texOcean; // beyond the hull
+                    if (wx >= 0 && wy >= 0 && wx < gMapW && wy < gMapH) {
+                        tex = &texWall;
+                        uint8_t t = TileGet(wx, wy);
+                        if (t == T_FLOOR) tex = &texFloor;
+                        else if (t == T_DOOR) tex = &texDoor;
+                        else if (t == T_THRESHOLD) tex = &texThresh;
+                        else if (t == T_BARS) tex = &texBars;
+                        else if (t == T_WHEEL) tex = &texWheel;
+                    }
                     DrawTexture(*tex, cx0 + (wx - px) * TILE,
                                 cy0 + (wy - py) * TILE, WHITE);
                 }
@@ -386,16 +436,20 @@ int main(void) {
                                 row * ATLAS_COLS + col + 1, DIR_NAME[dir],
                                 stepping ? "STEP" : "IDLE", col + 1, NC),
                      16, 16, fs, (Color){180,180,200,255});
-            DrawText("KEYPAD move   ENTER open door   0 stop + cycle idle   ARROWS cardinals   ESC quits",
+            DrawText("KEYPAD move   ENTER open door/bars   0 stop + cycle idle   ESC quits",
                      16, 16 + fs * 2, fs, (Color){120,120,145,255});
+            if (finished)
+                DrawText("LEVEL COMPLETE - you seized the ship's wheel!",
+                         16, 16 + fs * 4, fs, (Color){255,210,90,255});
         EndDrawing();
     }
 
     UnloadTexture(texFloor); UnloadTexture(texWall);
     UnloadTexture(texDoor);  UnloadTexture(texThresh);
+    UnloadTexture(texBars);  UnloadTexture(texOcean);
+    UnloadTexture(texWheel);
     UnloadTexture(atlas);
     free(gTiles);
-    free(gStack);
     CloseWindow();
     return 0;
 }

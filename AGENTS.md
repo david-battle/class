@@ -29,8 +29,9 @@ effects, which are not built yet. Keep changes small.
   tile per press in that facing and alternates the step pose (walk row,
   column 0) with a standing frame (idle row); walls and closed doors block
   movement (diagonals also need both adjacent cardinals open — no corner
-  cutting). `ENTER` opens the door being faced (it becomes a walkable stone
-  threshold). `0` stops into the standing row and cycles idle frames. Arrows
+  cutting). `ENTER` opens the door or bars being faced (they become a walkable
+  stone threshold). `0` stops into the standing row and cycles idle frames.
+  Arrows
   alias the four cardinals for keyboards without a pad. The avatar is always
   drawn at screen center; the world scrolls beneath it one whole tile per
   step — no sub-tile camera.
@@ -66,20 +67,22 @@ effects, which are not built yet. Keep changes small.
   NumLock on or off; this was verified empirically with xdotool under both
   states. Do not add numlock handling.
 
-## World (sparse maze, procedural tiles)
+## World (pre-generated levels, sparse tiles)
 
-- Model-A lattice: even-even tiles are rooms, odd-even/even-odd tiles are
-  corridor tiles (1-in-6 become closed doors at carve time), odd-odd is always
-  solid. The maze is grown lazily from a stack of pending rooms by a
-  randomized DFS biased toward the avatar (carve until every room within
-  view radius + 2 exists), so everything carved stays a connected perfect
-  maze as you explore.
-- Tiles live in an open-addressed hash map (`PackXY`/`TileGet`/`TileSet`);
-  absent = stone wall. `T_THRESHOLD` (opened door) is walkable. The stack and
-  map are the only world state — no bounds, no 2D array.
+- Levels are plain-text files (`level1.map`: `format 1`, `size W H`,
+  `start X Y`, one `tile X Y T` line per non-wall tile). `./class gen`
+  rewrites the default level deterministically (hand-placed, no RNG); the
+  game loads the file at startup and errors if it is missing.
+- Tiles still live in the open-addressed hash map (`PackXY`/`TileGet`/
+  `TileSet`); absent = solid ship wall. Outside `[0,W)x[0,H)` renders as
+  ocean (unwalkable). `T_THRESHOLD` (opened door/bars) is walkable.
+- Level 1 is a prison ship: start in a cell with `T_BARS` (left unlocked —
+  locking it is a planned revision), cross mess/cargo/galley/crew, reach the
+  `T_WHEEL` on the stern deck to finish (movement freezes, HUD banner).
 - Tile art is generated at startup with `GenImageColor` + `ImageDraw*`:
-  light-wood floor, stone-brick wall, dark-wood door, stone threshold. No
-  asset files. (This raylib's `ImageDrawLine` takes ints, not Vector2s.)
+  light-wood deck floor, dark-wood walls/doors (a ship, not stone), bars,
+  ocean, wheel, stone threshold. No asset files. (This raylib's
+  `ImageDrawLine` takes ints, not Vector2s.)
 
 ## Conventions
 
