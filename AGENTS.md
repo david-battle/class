@@ -25,11 +25,12 @@ effects, which are not built yet. Keep changes small.
   over the chosen monitor after `InitWindow()`, since RAIL ignores
   `SetWindowMonitor()`/`FLAG_FULLSCREEN_MODE`). Draws exactly one atlas frame
   at 1:1 pixels in the center of the screen. Keypad `7 8 9 / 4 6 / 1 2 3` picks
-  one of the eight facings and repeatedly pressing it cycles that facing's walk
-  frames (per-direction frame counters); `0` stops into the standing row and,
-  while standing, cycles the idle frames. Arrows alias the four cardinals for
-  keyboards without a pad. When a world exists the player stays centered and
-  the world moves around them — keep the sprite drawn at screen center.
+  one of the eight facings; each press alternates that facing's step pose
+  (walk row, column 0) with a standing frame (idle row), so mashing walks.
+  `0` stops into the standing row and, while standing, cycles the idle frames.
+  Arrows alias the four cardinals for keyboards without a pad. When a world
+  exists the player stays centered and the world moves around them — keep the
+  sprite drawn at screen center.
 - `Hooded_Rogue_256_Frame_Sprite_Atlas.png` — 1254x1254 RGBA, 256 frames,
   16 columns x 16 rows.
 
@@ -48,12 +49,15 @@ effects, which are not built yet. Keep changes small.
 ## Atlas semantics (read off the art; `DIR_NAME`/`KP_DIR` in class.c)
 
 - Rows 0-7 are the eight idle facings clockwise from south — S, SW, W, NW, N,
-  NE, E, SE — and rows 8-15 are the matching walk cycles (row = facing + 8).
+  NE, E, SE — and rows 8-15 are the matching *step* poses (row = facing + 8).
   Basis: skin/hand pixels sit left of center in rows 1-3 and right in 6-7; the
   face vanishes in rows 3-5; walk rows match their idle partner's head-skin
   profile. Keypad digits map straight onto the compass (8=N … 1=SW … 7=NW).
-- Each row's 16 columns are that animation's frames, cycled by repeated
-  presses — not a free 16x16 grid.
+- **A walk row is not a cycle.** All 16 of its columns are the same mid-step
+  pose with idle-animation jitter (frame IoU vs column 0 is 0.85–1.00 in every
+  walk row). Walking is faked by alternating the standing frames with the step
+  pose per keypress; only column 0 of a walk row is ever drawn. An idle row's
+  columns, by contrast, are a real standing animation cycle.
 - GLFW resolves keypad keys by physical scancode (see
   `glfw/src/external/glfw/src/x11_init.c`), so raylib's `KEY_KP_*` fire with
   NumLock on or off; this was verified empirically with xdotool under both

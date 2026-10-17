@@ -1,8 +1,8 @@
 // "class" - a roguelike where you pick your class (by analogy to rogue).
 // Skeleton: draw one frame of the hooded-rogue atlas, centered, at native
-// resolution. The keypad walks the eight facings: each direction key cycles
-// that direction's walk row, 0 stops into the standing row. The player never
-// moves; the world will later move around us.
+// resolution. The keypad walks the eight facings: each direction key
+// alternates that facing's standing frame with its step frame, 0 stops. The
+// player never moves; the world will later move around us.
 #include "raylib.h"
 #include <string.h>
 
@@ -34,8 +34,11 @@ static const int ROW_Y[17] = {
 // Atlas semantics, read off the art (skin/hand pixels sit left of centre in
 // rows 1-3 and right in 6-7; the face disappears in rows 3-5): rows 0-7 are
 // the eight idle facings clockwise from south - S, SW, W, NW, N, NE, E, SE -
-// and rows 8-15 are the matching walk cycles (facing + 8). Each row is a
-// 16-frame animation cycled by repeated presses, not a free 16x16 grid.
+// and rows 8-15 are the matching "step" poses (facing + 8). An idle row's 16
+// columns are a standing animation cycle; a walk row's columns are all the
+// SAME mid-step pose with idle-animation jitter (verified: frame IoU vs
+// col 0 is 0.85-1.00 within every walk row), so walking is faked by
+// alternating the standing frames with the step pose - see the input code.
 #define NC 16
 static const char *DIR_NAME[8] = { "S", "SW", "W", "NW", "N", "NE", "E", "SE" };
 
@@ -95,15 +98,16 @@ int main(void) {
         TraceLog(LOG_WARNING, "atlas is %dx%d, expected %dx%d - frame table may be stale",
                  atlas.width, atlas.height, ATLAS_PX, ATLAS_PX);
 
-    // dir = facing 0..7 (DIR_NAME, atlas row dir when idle, dir+8 when
-    // walking); walkCol[] keeps each direction's walk position, idleCol the
-    // standing cycle, so stopping resumes where the idle row left off.
-    int dir = 0, walking = 0, col = 0, idleCol = 0, walkCol[8] = { 0 };
+    // dir = facing 0..7 (DIR_NAME, atlas row dir when standing, dir+8 when
+    // stepping); idleCol is the standing cycle.
+    int dir = 0, stepping = 0, col = 0, idleCol = 0;
 
     while (!WindowShouldClose()) {
-        // Keypad picks a facing and cycles that direction's walk frames; 0
-        // stops into the standing row, and while standing cycles the idle
-        // row. GLFW resolves keypad keys by physical scancode, so KEY_KP_*
+        // Walking is an alternation: a direction press shows that facing's
+        // step pose (walk row, column 0), the next press of the same key
+        // shows a standing frame (idle row), then step again. 0 stops into
+        // the standing row and, while standing, cycles its frames.
+        // GLFW resolves keypad keys by physical scancode, so KEY_KP_*
         // fires with NumLock on or off alike - no numlock handling needed.
         int d = -1;
         for (int k = 1; k <= 9; k++)
@@ -115,16 +119,21 @@ int main(void) {
             if (IsKeyPressed(KEY_LEFT))  d = 2;
         }
         if (IsKeyPressed(KEY_KP_0)) { // stop, or cycle the idle row while stopped
-            if (walking) { walking = 0; col = idleCol; }
+            if (stepping) { stepping = 0; col = idleCol; }
             else { idleCol = (idleCol + 1) % NC; col = idleCol; }
         } else if (d >= 0) {
-            col = walkCol[d]; // the frame this press selects, then advance
-            walkCol[d] = (walkCol[d] + 1) % NC;
-            dir = d;
-            walking = 1;
+            if (d == dir && stepping) { // already stepping: take a stand break
+                stepping = 0;
+                col = idleCol;
+                idleCol = (idleCol + 1) % NC;
+            } else {                    // new facing, or re-step after standing
+                stepping = 1;
+                dir = d;
+                col = 0;                // the step pose sits in column 0
+            }
         }
 
-        int row = walking ? dir + 8 : dir;
+        int row = stepping ? dir + 8 : dir;
 
         BeginDrawing();
             ClearBackground((Color){18,18,24,255});
@@ -145,9 +154,9 @@ int main(void) {
             if (fs < 14) fs = 14;
             DrawText(TextFormat("FRAME %d   facing %s   %s %d/%d",
                                 row * ATLAS_COLS + col + 1, DIR_NAME[dir],
-                                walking ? "WALK" : "IDLE", col + 1, NC),
+                                stepping ? "STEP" : "IDLE", col + 1, NC),
                      16, 16, fs, (Color){180,180,200,255});
-            DrawText("KEYPAD 7-9/4 6/1-3 walk   0 stop + cycle idle   ARROWS cardinals   ESC quits",
+            DrawText("KEYPAD 7-9/4 6/1-3 step/stand   0 stop + cycle idle   ARROWS cardinals   ESC quits",
                      16, 16 + fs * 2, fs, (Color){120,120,145,255});
         EndDrawing();
     }
