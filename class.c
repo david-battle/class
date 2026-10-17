@@ -1,7 +1,8 @@
 // "class" - a roguelike where you pick your class (by analogy to rogue).
 // Skeleton: draw one frame of the hooded-rogue atlas, centered, at native
-// resolution. Arrow keys step through the 256 frames; the player never moves,
-// the world will later move around us.
+// resolution. The keypad walks the eight facings: each direction key cycles
+// that direction's walk row, 0 stops into the standing row. The player never
+// moves; the world will later move around us.
 #include "raylib.h"
 #include <string.h>
 
@@ -29,6 +30,18 @@ static const int ROW_Y[17] = {
 #define ATLAS_COLS 16
 #define ATLAS_ROWS 16
 #define ATLAS_PX   1254
+
+// Atlas semantics, read off the art (skin/hand pixels sit left of centre in
+// rows 1-3 and right in 6-7; the face disappears in rows 3-5): rows 0-7 are
+// the eight idle facings clockwise from south - S, SW, W, NW, N, NE, E, SE -
+// and rows 8-15 are the matching walk cycles (facing + 8). Each row is a
+// 16-frame animation cycled by repeated presses, not a free 16x16 grid.
+#define NC 16
+static const char *DIR_NAME[8] = { "S", "SW", "W", "NW", "N", "NE", "E", "SE" };
+
+// Keypad digit -> direction index, keypad layout 7 8 9 / 4 6 / 1 2 3:
+// 8=N, 9=NE, 6=E, 3=SE, 2=S, 1=SW, 4=W, 7=NW. 0 (stop) and 5 (centre) are -1.
+static const int KP_DIR[10] = { -1, 1, 0, 7, 2, -1, 6, 3, 4, 5 };
 
 // Pick the external monitor. On WSLg the built-in laptop panel and the
 // external monitor are both named "rdp-N", so names alone can't tell them
@@ -82,15 +95,36 @@ int main(void) {
         TraceLog(LOG_WARNING, "atlas is %dx%d, expected %dx%d - frame table may be stale",
                  atlas.width, atlas.height, ATLAS_PX, ATLAS_PX);
 
-    int col = 0, row = 0;              // start on the first sprite
+    // dir = facing 0..7 (DIR_NAME, atlas row dir when idle, dir+8 when
+    // walking); walkCol[] keeps each direction's walk position, idleCol the
+    // standing cycle, so stopping resumes where the idle row left off.
+    int dir = 0, walking = 0, col = 0, idleCol = 0, walkCol[8] = { 0 };
 
     while (!WindowShouldClose()) {
-        // Arrow keys select a sprite. Each axis is clamped at both ends so
-        // the source rectangle can never leave the atlas.
-        if (IsKeyPressed(KEY_RIGHT) && col < ATLAS_COLS - 1) col++;
-        if (IsKeyPressed(KEY_LEFT)  && col > 0)              col--;
-        if (IsKeyPressed(KEY_DOWN)  && row < ATLAS_ROWS - 1) row++;
-        if (IsKeyPressed(KEY_UP)    && row > 0)              row--;
+        // Keypad picks a facing and cycles that direction's walk frames; 0
+        // stops into the standing row, and while standing cycles the idle
+        // row. GLFW resolves keypad keys by physical scancode, so KEY_KP_*
+        // fires with NumLock on or off alike - no numlock handling needed.
+        int d = -1;
+        for (int k = 1; k <= 9; k++)
+            if (IsKeyPressed(KEY_KP_0 + k)) d = KP_DIR[k];
+        if (d < 0) { // arrows: the four cardinals, for keyboards without a pad
+            if (IsKeyPressed(KEY_UP))    d = 4;
+            if (IsKeyPressed(KEY_RIGHT)) d = 6;
+            if (IsKeyPressed(KEY_DOWN))  d = 0;
+            if (IsKeyPressed(KEY_LEFT))  d = 2;
+        }
+        if (IsKeyPressed(KEY_KP_0)) { // stop, or cycle the idle row while stopped
+            if (walking) { walking = 0; col = idleCol; }
+            else { idleCol = (idleCol + 1) % NC; col = idleCol; }
+        } else if (d >= 0) {
+            col = walkCol[d]; // the frame this press selects, then advance
+            walkCol[d] = (walkCol[d] + 1) % NC;
+            dir = d;
+            walking = 1;
+        }
+
+        int row = walking ? dir + 8 : dir;
 
         BeginDrawing();
             ClearBackground((Color){18,18,24,255});
@@ -109,11 +143,11 @@ int main(void) {
 
             int fs = sh / 50;
             if (fs < 14) fs = 14;
-            DrawText(TextFormat("FRAME %d   col %d row %d / %d",
-                                row * ATLAS_COLS + col + 1, col + 1, row + 1,
-                                ATLAS_COLS * ATLAS_ROWS),
+            DrawText(TextFormat("FRAME %d   facing %s   %s %d/%d",
+                                row * ATLAS_COLS + col + 1, DIR_NAME[dir],
+                                walking ? "WALK" : "IDLE", col + 1, NC),
                      16, 16, fs, (Color){180,180,200,255});
-            DrawText("ARROW KEYS select a sprite   ESC quits",
+            DrawText("KEYPAD 7-9/4 6/1-3 walk   0 stop + cycle idle   ARROWS cardinals   ESC quits",
                      16, 16 + fs * 2, fs, (Color){120,120,145,255});
         EndDrawing();
     }
