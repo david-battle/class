@@ -1,0 +1,4 @@
+class
+*.o
+class.log
+nohup.out
