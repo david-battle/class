@@ -30,7 +30,8 @@ effects, which are not built yet. Keep changes small.
   column 0) with a standing frame (idle row); walls and closed doors block
   movement (diagonals also need both adjacent cardinals open — no corner
   cutting). `ENTER` opens the door or bars being faced (they become a walkable
-  stone threshold). `0` stops into the standing row and cycles idle frames.
+  stone threshold). Held movement keys auto-repeat (0.25 s initial delay, then
+  10 steps/s). `0` stops into the standing row and cycles idle frames.
   Arrows
   alias the four cardinals for keyboards without a pad. The avatar is always
   drawn at screen center; the world scrolls beneath it one whole tile per

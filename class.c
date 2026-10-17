@@ -52,6 +52,11 @@ static const char *DIR_NAME[8] = { "S", "SW", "W", "NW", "N", "NE", "E", "SE" };
 // 8=N, 9=NE, 6=E, 3=SE, 2=S, 1=SW, 4=W, 7=NW. 0 (stop) and 5 (centre) are -1.
 static const int KP_DIR[10] = { -1, 1, 0, 7, 2, -1, 6, 3, 4, 5 };
 
+// Hold-to-repeat for the movement keys: first repeat after REP_DELAY,
+// then one every REP_RATE while the key stays down.
+#define REP_DELAY 0.25f
+#define REP_RATE  0.10f
+
 // Screen-space step vector per facing (y grows downward, so S is +y).
 static const int DIR_DX[8] = { 0,-1,-1,-1, 0, 1, 1, 1 };
 static const int DIR_DY[8] = { 1, 1, 0,-1,-1,-1, 0, 1 };
@@ -356,6 +361,8 @@ int main(int argc, char **argv) {
     // tile - the avatar never moves on screen, the world scrolls beneath it.
     int dir = 0, stepping = 0, col = 0, idleCol = 0;
     int finished = 0; // reached the ship's wheel
+    int repKey = -1;  // held movement key, for auto-repeat
+    float repT = 0, repNext = 0;
     Texture2D texFloor = MakeFloorTex(), texWall = MakeWallTex();
     Texture2D texDoor = MakeDoorTex(), texThresh = MakeThreshTex();
     Texture2D texBars = MakeBarsTex(), texOcean = MakeOceanTex();
@@ -364,18 +371,31 @@ int main(int argc, char **argv) {
     while (!WindowShouldClose()) {
         // A direction press steps one tile (blocked by walls and closed
         // doors) and shows that facing's step pose; the next press of the
-        // same key shows a standing frame, then step again. 0 stops into
-        // the standing row and, while standing, cycles its frames.
+        // same key shows a standing frame, then step again. Holding a
+        // movement key auto-repeats (REP_DELAY, then REP_RATE). 0 stops
+        // into the standing row and, while standing, cycles its frames.
         // GLFW resolves keypad keys by physical scancode, so KEY_KP_*
         // fires with NumLock on or off alike - no numlock handling needed.
-        int d = -1;
+        int d = -1, key = -1;
         for (int k = 1; k <= 9; k++)
-            if (IsKeyPressed(KEY_KP_0 + k)) d = KP_DIR[k];
+            if (IsKeyPressed(KEY_KP_0 + k)) { d = KP_DIR[k]; key = KEY_KP_0 + k; }
         if (d < 0) { // arrows: the four cardinals, for keyboards without a pad
-            if (IsKeyPressed(KEY_UP))    d = 4;
-            if (IsKeyPressed(KEY_RIGHT)) d = 6;
-            if (IsKeyPressed(KEY_DOWN))  d = 0;
-            if (IsKeyPressed(KEY_LEFT))  d = 2;
+            if (IsKeyPressed(KEY_UP))    { d = 4; key = KEY_UP; }
+            if (IsKeyPressed(KEY_RIGHT)) { d = 6; key = KEY_RIGHT; }
+            if (IsKeyPressed(KEY_DOWN))  { d = 0; key = KEY_DOWN; }
+            if (IsKeyPressed(KEY_LEFT))  { d = 2; key = KEY_LEFT; }
+        }
+        if (key >= 0) { repKey = key; repT = 0; repNext = REP_DELAY; }
+        else if (repKey >= 0) {
+            if (!IsKeyDown(repKey)) repKey = -1;
+            else if ((repT += GetFrameTime()) >= repNext) {
+                repT = 0; repNext = REP_RATE;
+                d = repKey >= KEY_KP_0 && repKey <= KEY_KP_9
+                        ? KP_DIR[repKey - KEY_KP_0]
+                    : repKey == KEY_UP    ? 4
+                    : repKey == KEY_DOWN  ? 0
+                    : repKey == KEY_LEFT  ? 2 : 6;
+            }
         }
         if (IsKeyPressed(KEY_KP_0)) { // stop, or cycle the idle row while stopped
             if (stepping) { stepping = 0; col = idleCol; }
