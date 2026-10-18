@@ -70,6 +70,8 @@ static const int DIR_DY[8] = { 1, 1, 0,-1,-1,-1, 0, 1 };
 
 enum { T_FLOOR = 1, T_DOOR = 2, T_THRESHOLD = 3, T_BARS = 4, T_WHEEL = 5,
        T_WATER = 6 }; // open sea inside the hull outline (bow taper)
+static const char *TILE_NAME[7] = { "WALL", "floor", "door", "threshold",
+                                    "bars", "wheel", "water" };
 
 typedef struct { uint64_t key; uint8_t tile; } TileSlot;
 static TileSlot *gTiles;              // open-addressed hash; absent = wall
@@ -128,6 +130,18 @@ static void TileSetRaw(uint64_t k, uint8_t t) {
 }
 static void TileSet(int x, int y, uint8_t t) { TileSetRaw(PackXY(x, y), t); }
 
+static void TileDel(int x, int y) { // zeroing a slot breaks probe chains, so
+    uint64_t k = PackXY(x, y);      // rebuild the table from the survivors
+    for (int i = 0; i < gTilesCap; i++)
+        if (gTiles[i].tile && gTiles[i].key == k) gTiles[i].tile = 0;
+    TileSlot *old = gTiles;
+    int oldCap = gTilesCap;
+    gTiles = NULL; gTilesCap = 0; gTilesCount = 0; // TileSetRaw allocates fresh
+    for (int i = 0; i < oldCap; i++)
+        if (old[i].tile) TileSetRaw(old[i].key, old[i].tile);
+    free(old);
+}
+
 static int Walkable(int x, int y) {
     uint8_t t = TileGet(x, y);
     return t == T_FLOOR || t == T_THRESHOLD || t == T_WHEEL; // doors/bars block
@@ -153,6 +167,19 @@ static int LoadLevel(const char *path, int *sx, int *sy) {
     }
     fclose(f);
     TraceLog(LOG_INFO, "level %s: %dx%d, %d tiles", path, gMapW, gMapH, gTilesCount);
+    return 1;
+}
+
+// Write the current tiles back out in LoadLevel's format.
+static int SaveLevel(const char *path, int sx, int sy) {
+    FILE *f = fopen(path, "w");
+    if (!f) { TraceLog(LOG_ERROR, "cannot write %s", path); return 0; }
+    fprintf(f, "format 1\nsize %d %d\nstart %d %d\n", gMapW, gMapH, sx, sy);
+    for (int i = 0; i < gTilesCap; i++) if (gTiles[i].tile)
+        fprintf(f, "tile %d %d %d\n", UnpackX(gTiles[i].key),
+                UnpackY(gTiles[i].key), gTiles[i].tile);
+    fclose(f);
+    TraceLog(LOG_INFO, "wrote %s (%d tiles)", path, gTilesCount);
     return 1;
 }
 
@@ -201,15 +228,7 @@ static void GenLevel1(const char *path) {
         TileSet(x, 13, T_FLOOR);
         TileSet(x, 14, T_FLOOR);
     }
-
-    FILE *f = fopen(path, "w");
-    if (!f) { TraceLog(LOG_ERROR, "cannot write %s", path); return; }
-    fprintf(f, "format 1\nsize %d %d\nstart 6 8\n", gMapW, gMapH);
-    for (int i = 0; i < gTilesCap; i++) if (gTiles[i].tile)
-        fprintf(f, "tile %d %d %d\n", UnpackX(gTiles[i].key),
-                UnpackY(gTiles[i].key), gTiles[i].tile);
-    fclose(f);
-    TraceLog(LOG_INFO, "wrote %s (%d tiles)", path, gTilesCount);
+    SaveLevel(path, 6, 8);
 }
 
 // Procedural tile art: no asset files, just a little pixel scribbling.
@@ -325,11 +344,13 @@ int main(int argc, char **argv) {
         GenLevel1(argc > 2 ? argv[2] : LEVEL_FILE);
         return 0;
     }
+    const char *levelPath = LEVEL_FILE;
     int px = 0, py = 0; // avatar's world tile, start filled in by the level
-    if (!LoadLevel(LEVEL_FILE, &px, &py)) {
-        TraceLog(LOG_ERROR, "failed to load %s (run ./class gen)", LEVEL_FILE);
+    if (!LoadLevel(levelPath, &px, &py)) {
+        TraceLog(LOG_ERROR, "failed to load %s (run ./class gen)", levelPath);
         return 1;
     }
+    int startX = px, startY = py; // saved start; edit mode must not move it
 
     // WSLg's RAIL shell ignores SetWindowMonitor()/FLAG_FULLSCREEN_MODE and
     // pins fullscreen X11 windows to the main screen, so cover the chosen
@@ -363,6 +384,10 @@ int main(int argc, char **argv) {
     int finished = 0; // reached the ship's wheel
     int repKey = -1;  // held movement key, for auto-repeat
     float repT = 0, repNext = 0;
+    int editing = 0;           // E toggles: click to paint, S saves
+    uint8_t editTile = T_FLOOR;
+    int lastPaintX = -1, lastPaintY = -1; // drag guard
+    float savedT = 0;          // "SAVED" banner timer
     Texture2D texFloor = MakeFloorTex(), texWall = MakeWallTex();
     Texture2D texDoor = MakeDoorTex(), texThresh = MakeThreshTex();
     Texture2D texBars = MakeBarsTex(), texOcean = MakeOceanTex();
@@ -376,17 +401,30 @@ int main(int argc, char **argv) {
         // into the standing row and, while standing, cycles its frames.
         // GLFW resolves keypad keys by physical scancode, so KEY_KP_*
         // fires with NumLock on or off alike - no numlock handling needed.
+        // Edit mode (E): keypad digits pick the paint tile instead of
+        // moving; arrows still move; click/drag paints; S saves the level
+        // back to the file it was loaded from.
         int d = -1, key = -1;
         for (int k = 1; k <= 9; k++)
-            if (IsKeyPressed(KEY_KP_0 + k)) { d = KP_DIR[k]; key = KEY_KP_0 + k; }
+            if (IsKeyPressed(KEY_KP_0 + k)) {
+                if (editing) editTile = (k <= 6) ? (uint8_t)k : 0;
+                else { d = KP_DIR[k]; key = KEY_KP_0 + k; }
+            }
         if (d < 0) { // arrows: the four cardinals, for keyboards without a pad
             if (IsKeyPressed(KEY_UP))    { d = 4; key = KEY_UP; }
             if (IsKeyPressed(KEY_RIGHT)) { d = 6; key = KEY_RIGHT; }
             if (IsKeyPressed(KEY_DOWN))  { d = 0; key = KEY_DOWN; }
             if (IsKeyPressed(KEY_LEFT))  { d = 2; key = KEY_LEFT; }
         }
+        if (IsKeyPressed(KEY_E)) {
+            editing = !editing;
+            repKey = -1;         // a key held across the toggle must not repeat
+            lastPaintX = lastPaintY = -1;
+        }
+        if (editing && IsKeyPressed(KEY_S) &&
+            SaveLevel(levelPath, startX, startY)) savedT = 2.0f;
         if (key >= 0) { repKey = key; repT = 0; repNext = REP_DELAY; }
-        else if (repKey >= 0) {
+        else if (repKey >= 0 && !editing) {
             if (!IsKeyDown(repKey)) repKey = -1;
             else if ((repT += GetFrameTime()) >= repNext) {
                 repT = 0; repNext = REP_RATE;
@@ -397,8 +435,9 @@ int main(int argc, char **argv) {
                     : repKey == KEY_LEFT  ? 2 : 6;
             }
         }
-        if (IsKeyPressed(KEY_KP_0)) { // stop, or cycle the idle row while stopped
-            if (stepping) { stepping = 0; col = idleCol; }
+        if (IsKeyPressed(KEY_KP_0)) { // edit: pick WALL; else stop or idle-cycle
+            if (editing) editTile = 0;
+            else if (stepping) { stepping = 0; col = idleCol; }
             else { idleCol = (idleCol + 1) % NC; col = idleCol; }
         } else if (d >= 0 && !finished) {
             int tx = px + DIR_DX[d], ty = py + DIR_DY[d];
@@ -423,11 +462,30 @@ int main(int argc, char **argv) {
                 col = 0;                // the step pose sits in column 0
             }
         }
-        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+        if (!editing && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
             int fx = px + DIR_DX[dir], fy = py + DIR_DY[dir];
             uint8_t t = TileGet(fx, fy);
             if (t == T_DOOR || t == T_BARS) TileSet(fx, fy, T_THRESHOLD);
         }
+
+        // Screen -> world for the mouse: the avatar sits at screen center,
+        // so the hovered tile falls out of the same cx0/cy0 the draw uses.
+        int hx = -1, hy = -1;
+        if (editing) {
+            int sw = GetRenderWidth(), sh = GetRenderHeight();
+            Vector2 m = GetMousePosition();
+            hx = px + (int)floorf((m.x - (sw / 2 - TILE / 2)) / TILE);
+            hy = py + (int)floorf((m.y - (sh / 2 - TILE / 2)) / TILE);
+            if (hx < 0 || hy < 0 || hx >= gMapW || hy >= gMapH) hx = hy = -1;
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                if (hx >= 0 && (hx != lastPaintX || hy != lastPaintY)) {
+                    if (editTile) TileSet(hx, hy, editTile);
+                    else TileDel(hx, hy);
+                    lastPaintX = hx; lastPaintY = hy;
+                }
+            } else lastPaintX = lastPaintY = -1;
+        }
+        if (savedT > 0) savedT -= GetFrameTime();
 
         int row = stepping ? dir + 8 : dir;
 
@@ -466,6 +524,10 @@ int main(int argc, char **argv) {
                                       (sh - (int)src.height) / 2.0f },
                            WHITE);
 
+            if (editing && hx >= 0)
+                DrawRectangleLines(cx0 + (hx - px) * TILE, cy0 + (hy - py) * TILE,
+                                   TILE, TILE, (Color){255, 220, 90, 255});
+
             int fs = sh / 50;
             if (fs < 14) fs = 14;
             DrawText(TextFormat("FRAME %d   facing %s   %s %d/%d",
@@ -474,7 +536,15 @@ int main(int argc, char **argv) {
                      16, 16, fs, (Color){180,180,200,255});
             DrawText("KEYPAD move   ENTER open door/bars   0 stop + cycle idle   ESC quits",
                      16, 16 + fs * 2, fs, (Color){120,120,145,255});
-            if (finished)
+            if (editing) {
+                DrawText(TextFormat("EDIT paint %s - KP 1-6/0 pick tile, click/drag paint, "
+                                    "arrows move, S save, E exit",
+                                    TILE_NAME[editTile]),
+                         16, 16 + fs * 3, fs, (Color){255, 220, 90, 255});
+                if (savedT > 0)
+                    DrawText(TextFormat("SAVED %s", levelPath),
+                             16, 16 + fs * 4, fs, (Color){120, 230, 140, 255});
+            } else if (finished)
                 DrawText("LEVEL COMPLETE - you seized the ship's wheel!",
                          16, 16 + fs * 4, fs, (Color){255,210,90,255});
         EndDrawing();

@@ -84,6 +84,16 @@ effects, which are not built yet. Keep changes small.
 - Level 1 is a prison ship: start in a cell with `T_BARS` (left unlocked —
   locking it is a planned revision), cross mess/cargo/galley/crew, reach the
   `T_WHEEL` on the stern deck to finish (movement freezes, HUD banner).
+- Level edit mode (added after the level file existed, so maps can be hand-
+  patched in-game): `E` toggles it. Keypad `1`–`6` pick tile types
+  (FLOOR/DOOR/THRESHOLD/BARS/WHEEL/WATER), `0` picks WALL (delete); click or
+  drag paints the picked tile (one paint per tile crossed, `lastPaintX/Y`
+  guard), out-of-bounds clicks are ignored, `S` writes the map back to the
+  loaded file (original `start`, not current position; 2 s HUD banner).
+  Arrows still move; keypad movement, `ENTER`, and key repeat are suppressed
+  while editing. Hovered tile is highlighted gold. `TileDel` zeroes the slot
+  then rebuilds the table (zeroing breaks probe chains). `SaveLevel` is shared
+  with `gen`.
 - Tile art is generated at startup with `GenImageColor` + `ImageDraw*`:
   light-wood deck floor, dark-wood walls/doors (a ship, not stone), bars,
   ocean, wheel, stone threshold. No asset files. (This raylib's
