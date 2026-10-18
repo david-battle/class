@@ -38,6 +38,8 @@ effects, which are not built yet. Keep changes small.
   step — no sub-tile camera.
 - `Hooded_Rogue_256_Frame_Sprite_Atlas.png` — 1254x1254 RGBA, 256 frames,
   16 columns x 16 rows.
+- `HANDOFF.md` — status snapshot, planned revisions, and a verification
+  recipe for the next session; update it when handing off.
 
 ## Atlas geometry (measured from the file, do not re-derive casually)
 
