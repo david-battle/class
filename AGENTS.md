@@ -89,7 +89,9 @@ effects, which are not built yet. Keep changes small.
   (FLOOR/DOOR/THRESHOLD/BARS/WHEEL/WATER), `0` picks WALL (delete); click or
   drag paints the picked tile (one paint per tile crossed, `lastPaintX/Y`
   guard), out-of-bounds clicks are ignored, `S` writes the map back to the
-  loaded file (original `start`, not current position; 2 s HUD banner).
+  loaded file (original `start`, not current position; doors/bars opened in
+  play are written with their original type, not as `T_THRESHOLD`; 2 s HUD
+  banner).
   Arrows still move; keypad movement, `ENTER`, and key repeat are suppressed
   while editing. Hovered tile is highlighted gold. `TileDel` zeroes the slot
   then rebuilds the table (zeroing breaks probe chains). `SaveLevel` is shared

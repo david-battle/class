@@ -147,6 +147,25 @@ static int Walkable(int x, int y) {
     return t == T_FLOOR || t == T_THRESHOLD || t == T_WHEEL; // doors/bars block
 }
 
+// Doors/bars the player opened at runtime. The live map keeps the threshold
+// so it stays walkable, but SaveLevel writes the original type back - saving
+// a level you walked through must not bake opened doors into the file.
+#define OPENED_MAX 64
+static struct { uint64_t key; uint8_t t; } gOpened[OPENED_MAX];
+static int gOpenedN;
+static void OpenedNote(int x, int y, uint8_t t) {
+    if (gOpenedN < OPENED_MAX) {
+        gOpened[gOpenedN].key = PackXY(x, y);
+        gOpened[gOpenedN].t = t;
+        gOpenedN++;
+    }
+}
+static int OpenedOrig(uint64_t key, uint8_t *out) {
+    for (int i = 0; i < gOpenedN; i++)
+        if (gOpened[i].key == key) { *out = gOpened[i].t; return 1; }
+    return 0;
+}
+
 // Level files are plain text: "format 1", "size W H", "start X Y", and one
 // "tile X Y T" line per non-wall tile (absent tiles are ship wall).
 static int LoadLevel(const char *path, int *sx, int *sy) {
@@ -175,9 +194,12 @@ static int SaveLevel(const char *path, int sx, int sy) {
     FILE *f = fopen(path, "w");
     if (!f) { TraceLog(LOG_ERROR, "cannot write %s", path); return 0; }
     fprintf(f, "format 1\nsize %d %d\nstart %d %d\n", gMapW, gMapH, sx, sy);
-    for (int i = 0; i < gTilesCap; i++) if (gTiles[i].tile)
+    for (int i = 0; i < gTilesCap; i++) if (gTiles[i].tile) {
+        uint8_t t = gTiles[i].tile, orig;
+        if (t == T_THRESHOLD && OpenedOrig(gTiles[i].key, &orig)) t = orig;
         fprintf(f, "tile %d %d %d\n", UnpackX(gTiles[i].key),
-                UnpackY(gTiles[i].key), gTiles[i].tile);
+                UnpackY(gTiles[i].key), t);
+    }
     fclose(f);
     TraceLog(LOG_INFO, "wrote %s (%d tiles)", path, gTilesCount);
     return 1;
@@ -465,7 +487,10 @@ int main(int argc, char **argv) {
         if (!editing && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
             int fx = px + DIR_DX[dir], fy = py + DIR_DY[dir];
             uint8_t t = TileGet(fx, fy);
-            if (t == T_DOOR || t == T_BARS) TileSet(fx, fy, T_THRESHOLD);
+            if (t == T_DOOR || t == T_BARS) {
+                OpenedNote(fx, fy, t);
+                TileSet(fx, fy, T_THRESHOLD);
+            }
         }
 
         // Screen -> world for the mouse: the avatar sits at screen center,
